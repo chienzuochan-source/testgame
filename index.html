@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Food Chain</title>
 <style>
   html, body {
@@ -12,6 +15,11 @@
     color: #cfefff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
   #game {
     display: block;
@@ -106,6 +114,82 @@
     opacity: 1;
     transform: translate(-50%, -50%) scale(1);
   }
+
+  /* Mobile responsive HUD */
+  @media (max-width: 600px) {
+    #hud { font-size: 12px; top: 8px; left: 8px; }
+    #hud .stage { font-size: 15px; }
+    #xpBar { width: 140px; height: 6px; }
+    #danger { font-size: 12px; top: 8px; right: 8px; }
+    #overlay h1 { font-size: 30px; }
+    #overlay p { font-size: 14px; max-width: 92vw; }
+    #evolveToast { font-size: 28px; }
+  }
+
+  /* Touch controls — visible only when JS detects a touch device */
+  #touchControls {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    display: none;
+    z-index: 5;
+  }
+  #touchControls.active { display: block; }
+  #joystick {
+    position: absolute;
+    left: 30px;
+    bottom: 30px;
+    width: 120px;
+    height: 120px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-radius: 50%;
+    pointer-events: auto;
+    touch-action: none;
+  }
+  #joystickKnob {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 52px;
+    height: 52px;
+    margin: -26px 0 0 -26px;
+    background: rgba(255, 255, 255, 0.35);
+    border: 2px solid rgba(255, 255, 255, 0.55);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+  #actionBtn {
+    position: absolute;
+    right: 30px;
+    bottom: 40px;
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: rgba(65, 196, 255, 0.35);
+    border: 2px solid rgba(255, 255, 255, 0.5);
+    color: white;
+    font-size: 16px;
+    font-weight: 700;
+    pointer-events: auto;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    cursor: pointer;
+    padding: 0;
+  }
+  #actionBtn:active { background: rgba(65, 196, 255, 0.65); }
+  #actionBtn:empty { display: none; }
+  @supports (padding: max(0px)) {
+    #joystick {
+      left: max(30px, env(safe-area-inset-left));
+      bottom: max(30px, env(safe-area-inset-bottom));
+    }
+    #actionBtn {
+      right: max(30px, env(safe-area-inset-right));
+      bottom: max(40px, calc(env(safe-area-inset-bottom) + 10px));
+    }
+  }
 </style>
 </head>
 <body>
@@ -117,6 +201,10 @@
 </div>
 <div id="danger">⚠ PREDATOR NEARBY</div>
 <div id="evolveToast"></div>
+<div id="touchControls">
+  <div id="joystick"><div id="joystickKnob"></div></div>
+  <button id="actionBtn"></button>
+</div>
 <div id="overlay">
   <h1 id="overlayTitle">Food Chain</h1>
   <p id="overlayText">
@@ -227,10 +315,88 @@
 
   let W = 0, H = 0;
   function resize() {
-    W = canvas.width = window.innerWidth;
-    H = canvas.height = window.innerHeight;
+    const dpr = window.devicePixelRatio || 1;
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (joystickEl) updateJoystickCenter();
   }
   window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 100));
+
+  // --- Touch controls ---
+  const joystickEl = document.getElementById('joystick');
+  const knobEl = document.getElementById('joystickKnob');
+  const actionBtn = document.getElementById('actionBtn');
+  const touchControls = document.getElementById('touchControls');
+  const joystick = { active: false, touchId: null, dx: 0, dy: 0, cx: 0, cy: 0, radius: 50 };
+
+  function updateJoystickCenter() {
+    const rect = joystickEl.getBoundingClientRect();
+    joystick.cx = rect.left + rect.width / 2;
+    joystick.cy = rect.top + rect.height / 2;
+    joystick.radius = rect.width / 2 - 8;
+  }
+  function applyJoystick(touch) {
+    const dx = touch.clientX - joystick.cx;
+    const dy = touch.clientY - joystick.cy;
+    const len = Math.hypot(dx, dy);
+    const max = joystick.radius;
+    if (len > max) {
+      joystick.dx = dx / len;
+      joystick.dy = dy / len;
+      knobEl.style.transform = `translate(${joystick.dx * max}px, ${joystick.dy * max}px)`;
+    } else {
+      joystick.dx = dx / max;
+      joystick.dy = dy / max;
+      knobEl.style.transform = `translate(${dx}px, ${dy}px)`;
+    }
+  }
+  joystickEl.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (joystick.active) return;
+    const t = e.changedTouches[0];
+    joystick.active = true;
+    joystick.touchId = t.identifier;
+    updateJoystickCenter();
+    applyJoystick(t);
+  }, { passive: false });
+  window.addEventListener('touchmove', e => {
+    if (!joystick.active) return;
+    for (const t of e.changedTouches) {
+      if (t.identifier === joystick.touchId) {
+        e.preventDefault();
+        applyJoystick(t);
+      }
+    }
+  }, { passive: false });
+  function endJoystick(e) {
+    for (const t of e.changedTouches) {
+      if (t.identifier === joystick.touchId) {
+        joystick.active = false;
+        joystick.touchId = null;
+        joystick.dx = 0;
+        joystick.dy = 0;
+        knobEl.style.transform = 'translate(0, 0)';
+      }
+    }
+  }
+  window.addEventListener('touchend', endJoystick);
+  window.addEventListener('touchcancel', endJoystick);
+
+  // Action button — simulates spacebar held while pressed.
+  actionBtn.addEventListener('touchstart', e => { e.preventDefault(); keys[' '] = true; }, { passive: false });
+  actionBtn.addEventListener('touchend', e => { e.preventDefault(); keys[' '] = false; }, { passive: false });
+  actionBtn.addEventListener('touchcancel', e => { e.preventDefault(); keys[' '] = false; }, { passive: false });
+
+  // Show touch UI on touch-capable devices.
+  const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  if (isTouch) touchControls.classList.add('active');
+
   resize();
 
   // World is larger than the viewport; the camera follows the player.
@@ -450,6 +616,7 @@
     if (keys['s'] || keys['arrowdown']) dy += 1;
     if (keys['a'] || keys['arrowleft']) dx -= 1;
     if (keys['d'] || keys['arrowright']) dx += 1;
+    if (joystick.active) { dx += joystick.dx; dy += joystick.dy; }
     const len = Math.hypot(dx, dy);
     if (len > 0) { dx /= len; dy /= len; }
 
@@ -1197,6 +1364,11 @@
       hideStr = ' · Spotted!';
     }
     statLine.textContent = `Size ${stage.size} · Speed ${stage.speed.toFixed(1)}${abilityStr}${hideStr}`;
+    // Touch action button label tracks the current ability.
+    let actionLabel = '';
+    if (stage.name === 'Squid') actionLabel = 'INK';
+    else if (player.stage >= 4) actionLabel = 'DASH';
+    if (actionBtn.textContent !== actionLabel) actionBtn.textContent = actionLabel;
     const pct = stage.xpToNext === Infinity ? 100 : (player.xp / stage.xpToNext) * 100;
     xpFill.style.width = Math.min(100, pct) + '%';
   }
