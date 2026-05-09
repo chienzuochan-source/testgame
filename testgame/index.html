@@ -1,0 +1,1319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Food Chain</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #001b2e;
+    color: #cfefff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #game {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+  #hud {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+  #hud .stage {
+    font-size: 18px;
+    font-weight: 600;
+  }
+  #xpBar {
+    width: 220px;
+    height: 8px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 4px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  #xpFill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #5cf08a, #41c4ff);
+    transition: width 0.15s ease;
+  }
+  #danger {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    color: #ff6b6b;
+    font-weight: 600;
+    opacity: 0;
+    transition: opacity 0.2s;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  }
+  #overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 10, 20, 0.85);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 24px;
+    z-index: 10;
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 {
+    font-size: 42px;
+    margin: 0 0 12px;
+    background: linear-gradient(90deg, #5cf08a, #41c4ff);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  #overlay p { max-width: 480px; line-height: 1.5; }
+  #overlay button {
+    margin-top: 18px;
+    padding: 10px 22px;
+    background: #41c4ff;
+    color: #001b2e;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #overlay button:hover { background: #5cf08a; }
+  #evolveToast {
+    position: fixed;
+    top: 40%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(0.8);
+    font-size: 36px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 0 0 20px #41c4ff, 0 0 40px #41c4ff;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s, transform 0.4s;
+  }
+  #evolveToast.show {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <div class="stage" id="stageLabel">Plankton</div>
+  <div id="statLine">Size 6 · Speed 2.4</div>
+  <div id="xpBar"><div id="xpFill"></div></div>
+</div>
+<div id="danger">⚠ PREDATOR NEARBY</div>
+<div id="evolveToast"></div>
+<div id="overlay">
+  <h1 id="overlayTitle">Food Chain</h1>
+  <p id="overlayText">
+    You are a tiny creature in a vast ocean. Eat smaller life to grow. Avoid anything bigger than you — it will eat you.
+    Climb the food chain through 7 stages of evolution.<br><br>
+    <b>Move:</b> WASD or Arrow keys.<br>
+    <b>Squid stage:</b> Spacebar releases ink — blinds nearby predators for 3s.<br>
+    <b>Barracuda+:</b> Spacebar dashes.
+  </p>
+  <button id="startBtn">Start</button>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const stageLabel = document.getElementById('stageLabel');
+  const statLine = document.getElementById('statLine');
+  const xpFill = document.getElementById('xpFill');
+  const dangerEl = document.getElementById('danger');
+  const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlayTitle');
+  const overlayText = document.getElementById('overlayText');
+  const startBtn = document.getElementById('startBtn');
+  const evolveToast = document.getElementById('evolveToast');
+
+  // --- Audio (Web Audio API, all sounds synthesized) ---
+  let audioCtx = null;
+  let nextHeartbeat = 0;
+
+  function initAudio() {
+    if (audioCtx) return;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (Ctor) audioCtx = new Ctor();
+  }
+
+  function playChomp() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(420, t);
+    osc.frequency.exponentialRampToValueAtTime(90, t + 0.12);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.linearRampToValueAtTime(0.18, t + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.16);
+  }
+
+  function playEvolve() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const notes = [523.25, 659.25, 783.99]; // C-E-G arpeggio
+    notes.forEach((freq, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const start = t + i * 0.08;
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(0.15, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.4);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(start);
+      osc.stop(start + 0.45);
+    });
+  }
+
+  function playDeath() {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(180, t);
+    osc.frequency.exponentialRampToValueAtTime(35, t + 0.7);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.linearRampToValueAtTime(0.3, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.8);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.85);
+  }
+
+  function playHeartbeat(intensity) {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const vol = 0.25 + intensity * 0.25;
+    // Lub-dub: two quick low thumps.
+    [[0, 75], [0.15, 60]].forEach(([delay, freq]) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const start = t + delay;
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq * 1.6, start);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.5, start + 0.12);
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.linearRampToValueAtTime(vol, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.13);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(start);
+      osc.stop(start + 0.15);
+    });
+  }
+
+  let W = 0, H = 0;
+  function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // World is larger than the viewport; the camera follows the player.
+  const WORLD = { w: 4000, h: 4000 };
+
+  // Evolution stages — size, speed, color, name. Player starts at 0.
+  const STAGES = [
+    { name: 'Plankton',  size: 6,  speed: 2.4, color: '#bff7ff', xpToNext: 60  },
+    { name: 'Minnow',    size: 12, speed: 2.8, color: '#9be7ff', xpToNext: 120 },
+    { name: 'Fish',      size: 22, speed: 3.0, color: '#6fd0ff', xpToNext: 220 },
+    { name: 'Squid',     size: 30, speed: 3.0, color: '#c89bdc', xpToNext: 320 },
+    { name: 'Barracuda', size: 40, speed: 3.6, color: '#7affb0', xpToNext: 460 },
+    { name: 'Shark',     size: 56, speed: 3.4, color: '#cfd8e0', xpToNext: 620 },
+    { name: 'Orca',      size: 80, speed: 3.2, color: '#ffffff', xpToNext: Infinity },
+  ];
+
+  // Creature pool — sizes span the whole range so the player always
+  // has prey and predators relative to whatever stage they're at.
+  const SPECIES = [
+    { name: 'algae',     size: 4,  speed: 0.4, color: '#7fdca0' },
+    { name: 'krill',     size: 8,  speed: 1.2, color: '#ffd5a8' },
+    { name: 'minnow',    size: 14, speed: 1.8, color: '#9be7ff' },
+    { name: 'fish',      size: 24, speed: 2.2, color: '#6fd0ff' },
+    { name: 'eel',       size: 32, speed: 2.0, color: '#b39ddb' },
+    { name: 'squid',     size: 30, speed: 2.4, color: '#c89bdc' },
+    { name: 'barracuda', size: 40, speed: 2.8, color: '#7affb0' },
+    { name: 'shark',     size: 60, speed: 2.6, color: '#cfd8e0' },
+    { name: 'orca',      size: 90, speed: 2.4, color: '#ffffff' },
+    { name: 'kraken',    size: 140, speed: 1.8, color: '#7a3a8a' },
+  ];
+
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === ' ') e.preventDefault();
+  });
+  window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  let player, creatures, particles, inkClouds, hideSpots, seabedDecor, camera, dashCooldown, inkCooldown, gameRunning;
+  const CORAL_COLORS = ['#ff8a7a', '#ffaf60', '#ff6b9a', '#c879d6', '#ffc46a'];
+  const ALGAE_TARGET = 60;
+  const FISH_TARGET = 40;
+
+  function resetGame() {
+    player = {
+      x: WORLD.w / 2,
+      y: WORLD.h / 2,
+      vx: 0, vy: 0,
+      angle: 0,
+      stage: 0,
+      xp: 0,
+      dashTimer: 0,
+      hidden: false,
+      hideExhausted: false,
+      hidingFrom: null,
+    };
+    creatures = [];
+    particles = [];
+    inkClouds = [];
+    camera = { x: 0, y: 0 };
+    dashCooldown = 0;
+    inkCooldown = 0;
+    generateSeabed();
+    spawnHideSpots();
+    // Seed the world with a spread of creatures.
+    for (let i = 0; i < ALGAE_TARGET + FISH_TARGET; i++) spawnCreature();
+    gameRunning = true;
+  }
+
+  function spawnCreature(nearPlayer = false) {
+    const playerSize = STAGES[player ? player.stage : 0].size;
+    // Maintain algae separately from fish so the world stays sparse but
+    // plankton-stage players still have plenty to eat.
+    const algaeCount = creatures.reduce((n, c) => n + (c.species.name === 'algae' ? 1 : 0), 0);
+    let sp;
+    if (algaeCount < ALGAE_TARGET) {
+      sp = SPECIES.find(s => s.name === 'algae');
+    } else {
+      let candidates = SPECIES.filter(s => {
+        if (s.name === 'algae') return false;
+        const ratio = s.size / playerSize;
+        return ratio > 0.15 && ratio < 6;
+      });
+      if (candidates.length === 0) candidates = SPECIES.filter(s => s.name !== 'algae');
+      sp = candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
+    let x, y;
+    if (nearPlayer) {
+      // Spawn just outside view so things stream in as the player moves.
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.max(W, H) * 0.7;
+      x = player.x + Math.cos(angle) * dist;
+      y = player.y + Math.sin(angle) * dist;
+    } else {
+      x = Math.random() * WORLD.w;
+      y = Math.random() * WORLD.h;
+    }
+    x = Math.max(20, Math.min(WORLD.w - 20, x));
+    y = Math.max(20, Math.min(WORLD.h - 20, y));
+
+    creatures.push({
+      species: sp,
+      x, y,
+      vx: (Math.random() - 0.5) * sp.speed,
+      vy: (Math.random() - 0.5) * sp.speed,
+      angle: Math.random() * Math.PI * 2,
+      wanderTimer: Math.random() * 60,
+      chaseTimer: 0,
+      giveUpTimer: 0,
+    });
+  }
+
+  function generateSeabed() {
+    seabedDecor = [];
+    const sbTop = WORLD.h * 0.8;
+    const sbHeight = WORLD.h - sbTop;
+    const randSbY = () => sbTop + Math.random() * sbHeight;
+    // Sand color patches — large blobs of slightly lighter/darker sand.
+    for (let i = 0; i < 50; i++) {
+      const v = Math.random() * 50 - 20;
+      seabedDecor.push({
+        type: 'patch',
+        x: Math.random() * WORLD.w,
+        y: randSbY(),
+        size: 50 + Math.random() * 110,
+        color: `rgba(${184 + v}, ${148 + v}, ${100 + v}, 0.35)`,
+      });
+    }
+    // Sand ripples — small curved lines suggesting current.
+    for (let i = 0; i < 70; i++) {
+      seabedDecor.push({
+        type: 'ripple',
+        x: Math.random() * WORLD.w,
+        y: randSbY(),
+        size: 28 + Math.random() * 50,
+        angle: Math.random() * Math.PI * 2,
+      });
+    }
+    // Pebbles — tiny scattered stones.
+    for (let i = 0; i < 180; i++) {
+      const shade = Math.random() * 40 - 20;
+      seabedDecor.push({
+        type: 'pebble',
+        x: Math.random() * WORLD.w,
+        y: randSbY(),
+        size: 2.5 + Math.random() * 5,
+        color: `rgb(${110 + shade}, ${90 + shade}, ${70 + shade})`,
+      });
+    }
+  }
+
+  function spawnHideSpots() {
+    hideSpots = [];
+    const TOTAL = 55;
+    for (let i = 0; i < TOTAL; i++) {
+      const r = Math.random();
+      let kind, color, radius;
+      if (r < 0.4) {
+        kind = 'kelp';
+        color = '#2d8b4a';
+        radius = 32 + Math.random() * 22;
+      } else if (r < 0.75) {
+        kind = 'coral';
+        color = CORAL_COLORS[Math.floor(Math.random() * CORAL_COLORS.length)];
+        radius = 26 + Math.random() * 28;
+      } else {
+        kind = 'rock';
+        color = '#6a635a';
+        radius = 45 + Math.random() * 35;
+      }
+      const sbTop = WORLD.h * 0.8;
+      const yPad = radius + 10;
+      hideSpots.push({
+        kind, color, r: radius,
+        x: 100 + Math.random() * (WORLD.w - 200),
+        y: sbTop + yPad + Math.random() * (WORLD.h - sbTop - yPad * 2),
+        seed: Math.random() * 1000,
+      });
+    }
+  }
+
+  function spawnParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = Math.random() * 3 + 1;
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * s,
+        vy: Math.sin(a) * s,
+        life: 30 + Math.random() * 20,
+        maxLife: 50,
+        color,
+      });
+    }
+  }
+
+  function showEvolveToast(text) {
+    evolveToast.textContent = text;
+    evolveToast.classList.add('show');
+    setTimeout(() => evolveToast.classList.remove('show'), 1400);
+  }
+
+  function evolve() {
+    if (player.stage >= STAGES.length - 1) return;
+    player.stage++;
+    player.xp = 0;
+    spawnParticles(player.x, player.y, STAGES[player.stage].color, 60);
+    showEvolveToast('Evolved → ' + STAGES[player.stage].name);
+    playEvolve();
+  }
+
+  function updatePlayer() {
+    const stage = STAGES[player.stage];
+    let dx = 0, dy = 0;
+    if (keys['w'] || keys['arrowup']) dy -= 1;
+    if (keys['s'] || keys['arrowdown']) dy += 1;
+    if (keys['a'] || keys['arrowleft']) dx -= 1;
+    if (keys['d'] || keys['arrowright']) dx += 1;
+    const len = Math.hypot(dx, dy);
+    if (len > 0) { dx /= len; dy /= len; }
+
+    let speed = stage.speed;
+    // Spacebar ability differs by stage: ink for Squid, dash for Barracuda+.
+    if (stage.name === 'Squid') {
+      if (keys[' '] && inkCooldown === 0) {
+        inkClouds.push({
+          x: player.x, y: player.y,
+          life: 180, maxLife: 180,
+          radius: 30, maxRadius: 140,
+        });
+        inkCooldown = 240;
+      }
+    } else if (player.stage >= 4) {
+      if (player.dashTimer > 0) {
+        speed *= 2.4;
+        player.dashTimer--;
+      } else if (keys[' '] && dashCooldown === 0 && len > 0) {
+        player.dashTimer = 12;
+        dashCooldown = 60;
+      }
+    }
+    if (dashCooldown > 0 && player.dashTimer === 0) dashCooldown--;
+    if (inkCooldown > 0) inkCooldown--;
+
+    player.vx = dx * speed;
+    player.vy = dy * speed;
+    player.x += player.vx;
+    player.y += player.vy;
+    if (len > 0) player.angle = Math.atan2(dy, dx);
+
+    player.x = Math.max(stage.size, Math.min(WORLD.w - stage.size, player.x));
+    player.y = Math.max(stage.size, Math.min(WORLD.h - stage.size, player.y));
+
+    // Hiding: in any kelp/coral/rock the player overlaps. Stay hidden as long
+    // as the specific predator that was chasing us is still nearby. The moment
+    // that predator is gone (eaten or moved far away), eject the player from
+    // the bush.
+    let coverSpot = null;
+    for (const h of hideSpots) {
+      if (Math.hypot(h.x - player.x, h.y - player.y) < h.r * 0.85) {
+        coverSpot = h;
+        break;
+      }
+    }
+    if (coverSpot) {
+      const playerSize = stage.size;
+      // Lock onto a chasing predator on first frame in cover.
+      if (!player.hidingFrom && !player.hideExhausted) {
+        for (const c of creatures) {
+          if (c.species.size > playerSize * 1.05) {
+            const d = Math.hypot(c.x - player.x, c.y - player.y);
+            if (d < 320) { player.hidingFrom = c; break; }
+          }
+        }
+      }
+      // Verify that tracked predator still counts as "near".
+      if (player.hidingFrom) {
+        const stillExists = creatures.includes(player.hidingFrom);
+        const d = stillExists
+          ? Math.hypot(player.hidingFrom.x - player.x, player.hidingFrom.y - player.y)
+          : Infinity;
+        if (!stillExists || d > 500) {
+          player.hidingFrom = null;
+          player.hideExhausted = true;
+          // Eject player from the cover spot — push to just outside the radius.
+          let nx = player.x - coverSpot.x;
+          let ny = player.y - coverSpot.y;
+          const len = Math.hypot(nx, ny);
+          if (len < 1) {
+            const a = Math.random() * Math.PI * 2;
+            nx = Math.cos(a); ny = Math.sin(a);
+          } else {
+            nx /= len; ny /= len;
+          }
+          player.x = coverSpot.x + nx * (coverSpot.r + 8);
+          player.y = coverSpot.y + ny * (coverSpot.r + 8);
+          player.x = Math.max(stage.size, Math.min(WORLD.w - stage.size, player.x));
+          player.y = Math.max(stage.size, Math.min(WORLD.h - stage.size, player.y));
+          showEvolveToast('Spotted!');
+        }
+      }
+      player.hidden = !player.hideExhausted && player.hidingFrom !== null;
+    } else {
+      player.hidingFrom = null;
+      player.hideExhausted = false;
+      player.hidden = false;
+    }
+  }
+
+  function updateCreatures() {
+    const playerSize = STAGES[player.stage].size;
+    for (const c of creatures) {
+      c.wanderTimer--;
+      // React to player: flee if smaller, chase if bigger.
+      const ddx = player.x - c.x;
+      const ddy = player.y - c.y;
+      const dist = Math.hypot(ddx, ddy);
+      const sense = 220;
+      // Predator is "blinded" if it sits inside any active ink cloud.
+      const blinded = inkClouds.some(ink =>
+        Math.hypot(ink.x - c.x, ink.y - c.y) < ink.radius
+      );
+      if (dist < sense) {
+        const ratio = c.species.size / playerSize;
+        const fleeing = ratio < 0.85;
+        const wouldChase = ratio > 1.15 && dist < 320;
+        const chasing = wouldChase && c.giveUpTimer <= 0 && !blinded && !player.hidden;
+        if (fleeing || chasing) {
+          const sign = fleeing ? -1 : 1;
+          c.vx += (ddx / (dist || 1)) * sign * 0.08;
+          c.vy += (ddy / (dist || 1)) * sign * 0.08;
+        }
+        // Predator stamina: after ~10s of chasing, give up for ~5s.
+        if (chasing) {
+          c.chaseTimer++;
+          if (c.chaseTimer >= 600) {
+            c.giveUpTimer = 300;
+            c.chaseTimer = 0;
+          }
+        } else if (!wouldChase && c.chaseTimer > 0) {
+          c.chaseTimer = Math.max(0, c.chaseTimer - 2);
+        }
+      } else if (c.chaseTimer > 0) {
+        c.chaseTimer = Math.max(0, c.chaseTimer - 2);
+      }
+      if (c.giveUpTimer > 0) c.giveUpTimer--;
+      if (c.wanderTimer <= 0) {
+        c.vx += (Math.random() - 0.5) * 0.4;
+        c.vy += (Math.random() - 0.5) * 0.4;
+        c.wanderTimer = 40 + Math.random() * 60;
+      }
+      // Cap speed.
+      const maxV = c.species.speed;
+      const v = Math.hypot(c.vx, c.vy);
+      if (v > maxV) { c.vx = (c.vx / v) * maxV; c.vy = (c.vy / v) * maxV; }
+      c.x += c.vx;
+      c.y += c.vy;
+      if (c.x < 10 || c.x > WORLD.w - 10) c.vx *= -1;
+      if (c.y < 10 || c.y > WORLD.h - 10) c.vy *= -1;
+      c.x = Math.max(10, Math.min(WORLD.w - 10, c.x));
+      c.y = Math.max(10, Math.min(WORLD.h - 10, c.y));
+      if (v > 0.05) c.angle = Math.atan2(c.vy, c.vx);
+    }
+
+    // Keep population steady — creatures stream in from offscreen.
+    while (creatures.length < ALGAE_TARGET + FISH_TARGET) spawnCreature(true);
+  }
+
+  function handleCollisions() {
+    const playerSize = STAGES[player.stage].size;
+    for (let i = creatures.length - 1; i >= 0; i--) {
+      const c = creatures[i];
+      const d = Math.hypot(c.x - player.x, c.y - player.y);
+      const touchDist = playerSize * 0.85 + c.species.size * 0.85;
+      if (d < touchDist) {
+        if (c.species.size < playerSize * 0.95) {
+          // Eat — gain XP proportional to creature size.
+          const gained = Math.floor(c.species.size * 1.2 + 2);
+          player.xp += gained;
+          spawnParticles(c.x, c.y, c.species.color, 8);
+          creatures.splice(i, 1);
+          playChomp();
+          if (player.xp >= STAGES[player.stage].xpToNext) evolve();
+        } else if (c.species.size > playerSize * 1.05) {
+          // Got eaten.
+          playDeath();
+          gameOver(c.species.name);
+          return;
+        }
+      }
+    }
+  }
+
+  function updateInk() {
+    for (let i = inkClouds.length - 1; i >= 0; i--) {
+      const ink = inkClouds[i];
+      ink.life--;
+      // Quick expansion early, then plateau.
+      const t = 1 - ink.life / ink.maxLife;
+      ink.radius = 30 + (ink.maxRadius - 30) * Math.min(1, t * 3);
+      if (ink.life <= 0) inkClouds.splice(i, 1);
+    }
+  }
+
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vx *= 0.94;
+      p.vy *= 0.94;
+      p.life--;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  function drawCreature(x, y, size, color, angle, kind) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    switch (kind) {
+      case 'algae':     drawAlgae(size, color); break;
+      case 'plankton':  drawPlankton(size, color); break;
+      case 'krill':     drawKrill(size, color); break;
+      case 'eel':       drawEel(size, color); break;
+      case 'squid':     drawSquid(size, color); break;
+      case 'barracuda': drawBarracuda(size, color); break;
+      case 'shark':     drawShark(size, color); break;
+      case 'orca':      drawOrca(size, color); break;
+      case 'kraken':    drawKraken(size, color); break;
+      default:          drawFish(size, color); // minnow, fish
+    }
+    ctx.restore();
+  }
+
+  function drawEye(x, y, r, dark = '#000') {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = dark;
+    ctx.beginPath();
+    ctx.arc(x + r * 0.2, y, r * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawFish(size, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size, size * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-size, 0);
+    ctx.lineTo(-size - size * 0.5, -size * 0.5);
+    ctx.lineTo(-size - size * 0.5, size * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Pectoral fin.
+    ctx.beginPath();
+    ctx.ellipse(-size * 0.1, size * 0.4, size * 0.3, size * 0.12, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    // Top fin.
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.3, -size * 0.45);
+    ctx.lineTo(0, -size * 0.75);
+    ctx.lineTo(size * 0.2, -size * 0.45);
+    ctx.closePath();
+    ctx.fill();
+    drawEye(size * 0.4, -size * 0.2, size * 0.15);
+  }
+
+  function drawAlgae(size, color) {
+    ctx.fillStyle = color;
+    const blobs = [
+      [-size * 0.5, 0, size * 0.7],
+      [size * 0.4, -size * 0.3, size * 0.6],
+      [size * 0.2, size * 0.5, size * 0.55],
+      [-size * 0.2, -size * 0.5, size * 0.5],
+    ];
+    for (const [dx, dy, r] of blobs) {
+      ctx.beginPath();
+      ctx.arc(dx, dy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawPlankton(size, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(0, 0, size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * size, Math.sin(a) * size);
+      ctx.lineTo(Math.cos(a) * size * 1.7, Math.sin(a) * size * 1.7);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#3a7a5a';
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawKrill(size, color) {
+    ctx.fillStyle = color;
+    // Curved body.
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size, size * 0.35, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail fan.
+    ctx.beginPath();
+    ctx.moveTo(-size, 0);
+    ctx.lineTo(-size - size * 0.4, -size * 0.5);
+    ctx.lineTo(-size - size * 0.2, 0);
+    ctx.lineTo(-size - size * 0.4, size * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Antennae.
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(size, 0);
+    ctx.lineTo(size + size * 0.6, -size * 0.4);
+    ctx.moveTo(size, 0);
+    ctx.lineTo(size + size * 0.6, size * 0.4);
+    ctx.stroke();
+    // Tiny legs.
+    ctx.lineWidth = 0.8;
+    for (let i = -2; i <= 2; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * size * 0.25, size * 0.3);
+      ctx.lineTo(i * size * 0.25, size * 0.55);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.7, -size * 0.1, size * 0.1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawEel(size, color) {
+    ctx.fillStyle = color;
+    // Long thin body.
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size * 1.4, size * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Dorsal ribbon along the top.
+    ctx.beginPath();
+    ctx.moveTo(-size * 1.3, -size * 0.25);
+    ctx.quadraticCurveTo(0, -size * 0.65, size * 0.9, -size * 0.25);
+    ctx.lineTo(size * 0.9, -size * 0.2);
+    ctx.quadraticCurveTo(0, -size * 0.55, -size * 1.3, -size * 0.2);
+    ctx.closePath();
+    ctx.fill();
+    // Mouth.
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(size * 1.3, size * 0.05);
+    ctx.lineTo(size * 1.4, size * 0.05);
+    ctx.stroke();
+    drawEye(size * 1.05, -size * 0.08, size * 0.1);
+  }
+
+  function drawBarracuda(size, color) {
+    ctx.fillStyle = color;
+    // Long sleek body.
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size, size * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Pointed snout.
+    ctx.beginPath();
+    ctx.moveTo(size * 0.95, -size * 0.15);
+    ctx.lineTo(size + size * 0.4, 0);
+    ctx.lineTo(size * 0.95, size * 0.15);
+    ctx.closePath();
+    ctx.fill();
+    // Forked tail.
+    ctx.beginPath();
+    ctx.moveTo(-size, 0);
+    ctx.lineTo(-size - size * 0.6, -size * 0.55);
+    ctx.lineTo(-size - size * 0.3, 0);
+    ctx.lineTo(-size - size * 0.6, size * 0.55);
+    ctx.closePath();
+    ctx.fill();
+    // Dorsal fin.
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.3, -size * 0.3);
+    ctx.lineTo(0, -size * 0.7);
+    ctx.lineTo(size * 0.2, -size * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    // Teeth.
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(size * 1.0, size * 0.05);
+    ctx.lineTo(size * 1.25, size * 0.02);
+    ctx.stroke();
+    drawEye(size * 0.55, -size * 0.1, size * 0.11);
+  }
+
+  function drawShark(size, color) {
+    ctx.fillStyle = color;
+    // Streamlined body.
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size, size * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Pale belly.
+    ctx.fillStyle = '#f3f7f9';
+    ctx.beginPath();
+    ctx.ellipse(0, size * 0.18, size * 0.85, size * 0.22, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = color;
+    // Pointed snout.
+    ctx.beginPath();
+    ctx.moveTo(size * 0.85, -size * 0.18);
+    ctx.lineTo(size + size * 0.3, 0);
+    ctx.lineTo(size * 0.85, size * 0.18);
+    ctx.closePath();
+    ctx.fill();
+    // Big triangular dorsal fin.
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.1, -size * 0.4);
+    ctx.lineTo(size * 0.1, -size * 0.95);
+    ctx.lineTo(size * 0.35, -size * 0.4);
+    ctx.closePath();
+    ctx.fill();
+    // Crescent tail.
+    ctx.beginPath();
+    ctx.moveTo(-size, 0);
+    ctx.lineTo(-size - size * 0.55, -size * 0.7);
+    ctx.lineTo(-size - size * 0.3, 0);
+    ctx.lineTo(-size - size * 0.55, size * 0.45);
+    ctx.closePath();
+    ctx.fill();
+    // Pectoral fin.
+    ctx.beginPath();
+    ctx.moveTo(size * 0.1, size * 0.3);
+    ctx.lineTo(size * 0.5, size * 0.75);
+    ctx.lineTo(size * 0.55, size * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    // Gills.
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(size * 0.35 - i * size * 0.08, -size * 0.18);
+      ctx.lineTo(size * 0.35 - i * size * 0.08, size * 0.05);
+      ctx.stroke();
+    }
+    // Eye + mouth line.
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.6, -size * 0.18, size * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(size * 0.85, size * 0.05);
+    ctx.lineTo(size * 1.05, size * 0.02);
+    ctx.stroke();
+  }
+
+  function drawOrca(size, color) {
+    // Black body.
+    ctx.fillStyle = '#15191e';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size, size * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // White belly.
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.ellipse(0, size * 0.18, size * 0.82, size * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // White eye patch.
+    ctx.beginPath();
+    ctx.ellipse(size * 0.5, -size * 0.22, size * 0.16, size * 0.1, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Dorsal fin.
+    ctx.fillStyle = '#15191e';
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.2, -size * 0.45);
+    ctx.lineTo(0, -size * 0.95);
+    ctx.lineTo(size * 0.18, -size * 0.45);
+    ctx.closePath();
+    ctx.fill();
+    // Fluke (horizontal tail).
+    ctx.beginPath();
+    ctx.moveTo(-size, 0);
+    ctx.lineTo(-size - size * 0.45, -size * 0.5);
+    ctx.lineTo(-size - size * 0.25, 0);
+    ctx.lineTo(-size - size * 0.45, size * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Pectoral flipper.
+    ctx.beginPath();
+    ctx.moveTo(size * 0.05, size * 0.35);
+    ctx.lineTo(size * 0.4, size * 0.7);
+    ctx.lineTo(size * 0.5, size * 0.35);
+    ctx.closePath();
+    ctx.fill();
+    // Eye dot inside the white patch.
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(size * 0.55, -size * 0.22, size * 0.04, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawSquid(size, color) {
+    ctx.lineCap = 'round';
+    // Trailing tentacles (drawn first so they sit behind the mantle).
+    ctx.strokeStyle = color;
+    for (let i = 0; i < 6; i++) {
+      const offset = (i - 2.5) * size * 0.15;
+      ctx.lineWidth = size * 0.1;
+      ctx.beginPath();
+      ctx.moveTo(-size * 0.3, offset);
+      ctx.quadraticCurveTo(
+        -size * 0.9, offset * 1.4 + Math.sin(i) * size * 0.15,
+        -size * 1.4, offset * 2 + Math.sin(i * 1.7) * size * 0.25
+      );
+      ctx.stroke();
+    }
+    // Mantle (pointed end forward, like jet propulsion).
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, size, size * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Pointed tip.
+    ctx.beginPath();
+    ctx.moveTo(size, 0);
+    ctx.lineTo(size + size * 0.4, -size * 0.2);
+    ctx.lineTo(size + size * 0.4, size * 0.2);
+    ctx.closePath();
+    ctx.fill();
+    // Side fins.
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.ellipse(size * 0.3, -size * 0.45, size * 0.3, size * 0.15, 0, 0, Math.PI * 2);
+    ctx.ellipse(size * 0.3, size * 0.45, size * 0.3, size * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Big eyes near the wide end.
+    drawEye(-size * 0.05, -size * 0.3, size * 0.15);
+    drawEye(-size * 0.05, size * 0.3, size * 0.15);
+  }
+
+  function drawKraken(size, color) {
+    ctx.lineCap = 'round';
+    // Tentacles (drawn first so the head sits on top).
+    ctx.strokeStyle = color;
+    for (let i = 0; i < 7; i++) {
+      const t = (i - 3) * 0.18;
+      const startY = Math.sin(t) * size * 0.55;
+      ctx.lineWidth = size * (0.18 - Math.abs(i - 3) * 0.015);
+      ctx.beginPath();
+      ctx.moveTo(-size * 0.2, startY);
+      ctx.quadraticCurveTo(
+        -size * 0.9, startY * 1.6 + Math.sin(i) * size * 0.2,
+        -size * 1.5, startY * 2 + Math.sin(i * 2) * size * 0.3
+      );
+      ctx.stroke();
+    }
+    // Bulbous head.
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(size * 0.2, 0, size * 0.75, size * 0.65, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Mantle highlight.
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.beginPath();
+    ctx.ellipse(size * 0.3, -size * 0.25, size * 0.35, size * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Two angry eyes.
+    drawEye(size * 0.55, -size * 0.18, size * 0.11);
+    drawEye(size * 0.55, size * 0.18, size * 0.11);
+  }
+
+  function drawSeabed() {
+    const left = camera.x - 100, right = camera.x + W + 100;
+    const top = camera.y - 100, bottom = camera.y + H + 100;
+    for (const d of seabedDecor) {
+      if (d.x < left || d.x > right || d.y < top || d.y > bottom) continue;
+      if (d.type === 'patch') {
+        ctx.fillStyle = d.color;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.size, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (d.type === 'ripple') {
+        ctx.strokeStyle = 'rgba(120, 95, 70, 0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.save();
+        ctx.translate(d.x, d.y);
+        ctx.rotate(d.angle);
+        ctx.beginPath();
+        ctx.moveTo(-d.size / 2, 0);
+        ctx.quadraticCurveTo(0, -3, d.size / 2, 0);
+        ctx.stroke();
+        ctx.restore();
+      } else if (d.type === 'pebble') {
+        ctx.fillStyle = d.color;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, d.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.beginPath();
+        ctx.arc(d.x - d.size * 0.3, d.y - d.size * 0.3, d.size * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawHideSpot(h) {
+    if (h.kind === 'rock') {
+      ctx.fillStyle = '#3a3530';
+      ctx.beginPath();
+      ctx.ellipse(h.x + h.r * 0.1, h.y + h.r * 0.18, h.r, h.r * 0.65, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = h.color;
+      ctx.beginPath();
+      ctx.ellipse(h.x, h.y, h.r * 0.95, h.r * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.beginPath();
+      ctx.ellipse(h.x - h.r * 0.25, h.y - h.r * 0.18, h.r * 0.4, h.r * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (h.kind === 'kelp') {
+      const sway = Math.sin(Date.now() * 0.001 + h.seed) * h.r * 0.06;
+      ctx.fillStyle = h.color;
+      // Cluster of green strands.
+      for (let i = 0; i < 7; i++) {
+        const a = (i / 7) * Math.PI * 2;
+        const dx = Math.cos(a) * h.r * 0.45 + sway * Math.sin(i);
+        const dy = Math.sin(a) * h.r * 0.45;
+        ctx.beginPath();
+        ctx.ellipse(h.x + dx, h.y + dy, h.r * 0.13, h.r * 0.55, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Center clump.
+      ctx.beginPath();
+      ctx.ellipse(h.x + sway * 0.5, h.y, h.r * 0.22, h.r * 0.7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Lighter highlights.
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      for (let i = 0; i < 4; i++) {
+        const a = (i / 4) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.ellipse(
+          h.x + Math.cos(a) * h.r * 0.3 + sway,
+          h.y + Math.sin(a) * h.r * 0.2,
+          h.r * 0.06, h.r * 0.4, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (h.kind === 'coral') {
+      // Branching cluster of coloured circles.
+      const points = [
+        [0, 0, 1.0],
+        [-0.4, -0.25, 0.7],
+        [0.45, -0.3, 0.65],
+        [0.3, 0.4, 0.7],
+        [-0.5, 0.35, 0.6],
+        [-0.1, -0.55, 0.5],
+        [0.6, 0.1, 0.5],
+        [-0.6, -0.05, 0.45],
+      ];
+      ctx.fillStyle = h.color;
+      for (const [dx, dy, scale] of points) {
+        ctx.beginPath();
+        ctx.arc(h.x + dx * h.r, h.y + dy * h.r, h.r * 0.38 * scale, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      for (const [dx, dy, scale] of points.slice(0, 4)) {
+        ctx.beginPath();
+        ctx.arc(
+          h.x + dx * h.r - h.r * 0.06,
+          h.y + dy * h.r - h.r * 0.06,
+          h.r * 0.12 * scale, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function drawBackground() {
+    // Seabed occupies the bottom 1/5 of the world.
+    const seabedTopWorldY = WORLD.h * 0.8;
+    const seabedTopScreenY = seabedTopWorldY - camera.y;
+    const waterBottom = Math.max(0, Math.min(H, seabedTopScreenY));
+
+    // Water above the seabed.
+    if (waterBottom > 0) {
+      const grad = ctx.createLinearGradient(0, 0, 0, waterBottom);
+      grad.addColorStop(0, '#0a3a5c');
+      grad.addColorStop(1, '#0e4870');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, waterBottom);
+    }
+    // Sand below the seabed line.
+    if (waterBottom < H) {
+      const grad = ctx.createLinearGradient(0, waterBottom, 0, H);
+      grad.addColorStop(0, '#b89465');
+      grad.addColorStop(1, '#8a6c4a');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, waterBottom, W, H - waterBottom);
+    }
+
+    // Drifting plankton — only visible in the water region.
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    const tx = -camera.x * 0.3;
+    const ty = -camera.y * 0.3;
+    for (let i = 0; i < 60; i++) {
+      const x = ((i * 173) % W + tx) % W;
+      const y = ((i * 271) % H + ty) % H;
+      const fx = (x + W) % W;
+      const fy = (y + H) % H;
+      if (fy > waterBottom) continue;
+      ctx.beginPath();
+      ctx.arc(fx, fy, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function checkDanger() {
+    const playerSize = STAGES[player.stage].size;
+    let closest = Infinity;
+    for (const c of creatures) {
+      if (c.species.size > playerSize * 1.05) {
+        const d = Math.hypot(c.x - player.x, c.y - player.y);
+        if (d < closest) closest = d;
+      }
+    }
+    dangerEl.style.opacity = closest < 320 ? '1' : '0';
+    // Heartbeat — pace and volume scale with proximity.
+    const HEART_RANGE = 380;
+    if (audioCtx && !player.hidden && closest < HEART_RANGE) {
+      const now = audioCtx.currentTime;
+      if (now > nextHeartbeat) {
+        const intensity = 1 - closest / HEART_RANGE; // 0..1
+        playHeartbeat(intensity);
+        const interval = 1.2 - intensity * 0.7; // 0.5s..1.2s
+        nextHeartbeat = now + interval;
+      }
+    }
+  }
+
+  function updateHUD() {
+    const stage = STAGES[player.stage];
+    stageLabel.textContent = stage.name;
+    let abilityStr = '';
+    if (stage.name === 'Squid') {
+      abilityStr = ' · Ink: ' + (inkCooldown === 0 ? 'ready' : 'cooling');
+    } else if (player.stage >= 4) {
+      abilityStr = ' · Dash: ' + (dashCooldown === 0 ? 'ready' : 'cooling');
+    }
+    let hideStr = '';
+    if (player.hidden) {
+      hideStr = ' · Hidden';
+    } else if (player.hideExhausted) {
+      hideStr = ' · Spotted!';
+    }
+    statLine.textContent = `Size ${stage.size} · Speed ${stage.speed.toFixed(1)}${abilityStr}${hideStr}`;
+    const pct = stage.xpToNext === Infinity ? 100 : (player.xp / stage.xpToNext) * 100;
+    xpFill.style.width = Math.min(100, pct) + '%';
+  }
+
+  function gameOver(predator) {
+    gameRunning = false;
+    overlayTitle.textContent = 'Eaten by a ' + predator;
+    overlayText.innerHTML = `You reached <b>${STAGES[player.stage].name}</b>.<br>Try again — and watch your back.`;
+    startBtn.textContent = 'Restart';
+    overlay.classList.remove('hidden');
+  }
+
+  function gameWin() {
+    gameRunning = false;
+    overlayTitle.textContent = 'Apex Predator';
+    overlayText.innerHTML = 'You reached the top of the food chain. The ocean is yours.';
+    startBtn.textContent = 'Play again';
+    overlay.classList.remove('hidden');
+  }
+
+  function frame() {
+    if (gameRunning) {
+      updatePlayer();
+      updateCreatures();
+      handleCollisions();
+      updateInk();
+      updateParticles();
+      checkDanger();
+      updateHUD();
+
+      // Win condition: max stage + filled bar's worth of extra growth.
+      if (player.stage === STAGES.length - 1) {
+        // Stay alive at the top tier — call it a win after some kills.
+        player.xp += 0;
+        if (player.xp >= 400) gameWin();
+        // Eaten creatures still add XP at top tier so the win bar fills.
+        // (xpToNext is Infinity so evolve() never triggers.)
+      }
+
+      // Camera follows player, clamped to world bounds.
+      camera.x = Math.max(0, Math.min(WORLD.w - W, player.x - W / 2));
+      camera.y = Math.max(0, Math.min(WORLD.h - H, player.y - H / 2));
+    }
+
+    drawBackground();
+
+    ctx.save();
+    ctx.translate(-camera.x, -camera.y);
+
+    // World edge.
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(0, 0, WORLD.w, WORLD.h);
+
+    // Seabed decor (sand patches, ripples, pebbles) — base layer.
+    drawSeabed();
+
+    // Rocks (seafloor) — drawn under creatures.
+    for (const h of hideSpots) if (h.kind === 'rock') drawHideSpot(h);
+
+    // Creatures.
+    for (const c of creatures) {
+      drawCreature(c.x, c.y, c.species.size, c.species.color, c.angle, c.species.name);
+    }
+
+    // Ink clouds — drawn over creatures (obscures predators) but under player.
+    for (const ink of inkClouds) {
+      const fade = Math.min(1, ink.life / 60);
+      const grad = ctx.createRadialGradient(ink.x, ink.y, ink.radius * 0.2, ink.x, ink.y, ink.radius);
+      grad.addColorStop(0, `rgba(10, 5, 20, ${0.75 * fade})`);
+      grad.addColorStop(1, `rgba(10, 5, 20, 0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(ink.x, ink.y, ink.radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Player — outlined so it pops. Slightly faded when hidden.
+    const stage = STAGES[player.stage];
+    ctx.shadowColor = stage.color;
+    ctx.shadowBlur = 12;
+    if (player.hidden) ctx.globalAlpha = 0.55;
+    drawCreature(player.x, player.y, stage.size, stage.color, player.angle, stage.name.toLowerCase());
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+
+    // Kelp & coral — drawn over creatures and player so they act as visual cover.
+    for (const h of hideSpots) if (h.kind !== 'rock') drawHideSpot(h);
+
+    // Particles.
+    for (const p of particles) {
+      ctx.globalAlpha = p.life / p.maxLife;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.restore();
+
+    requestAnimationFrame(frame);
+  }
+
+  startBtn.addEventListener('click', () => {
+    initAudio();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    nextHeartbeat = 0;
+    overlay.classList.add('hidden');
+    resetGame();
+  });
+
+  // Show start overlay; loop runs immediately so background is drawn.
+  resetGame();
+  gameRunning = false;
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
