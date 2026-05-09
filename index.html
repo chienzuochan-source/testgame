@@ -435,8 +435,15 @@
   });
   window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
 
-  let player, creatures, particles, inkClouds, hideSpots, seabedDecor, camera, dashCooldown, inkCooldown, gameRunning;
+  let player, creatures, particles, inkClouds, hideSpots, seabedDecor, chests, camera, dashCooldown, inkCooldown, gameRunning;
   const CORAL_COLORS = ['#ff8a7a', '#ffaf60', '#ff6b9a', '#c879d6', '#ffc46a'];
+  const CHEST_TARGET = 8;
+  const KRAKEN_OVERRIDE = { name: 'Kraken', size: 140, speed: 3.5, color: '#a064c8' };
+
+  function currentStage() {
+    if (player && player.krakenTimer > 0) return KRAKEN_OVERRIDE;
+    return STAGES[player.stage];
+  }
   const ALGAE_TARGET = 60;
   const FISH_TARGET = 40;
 
@@ -452,15 +459,20 @@
       hidden: false,
       hideExhausted: false,
       hidingFrom: null,
+      speedBoostTimer: 0,
+      fightBackTimer: 0,
+      krakenTimer: 0,
     };
     creatures = [];
     particles = [];
     inkClouds = [];
+    chests = [];
     camera = { x: 0, y: 0 };
     dashCooldown = 0;
     inkCooldown = 0;
     generateSeabed();
     spawnHideSpots();
+    for (let i = 0; i < CHEST_TARGET; i++) spawnChest();
     // Seed the world with a spread of creatures.
     for (let i = 0; i < ALGAE_TARGET + FISH_TARGET; i++) spawnCreature();
     gameRunning = true;
@@ -549,6 +561,41 @@
     }
   }
 
+  function spawnChest() {
+    const sbTop = WORLD.h * 0.8;
+    const sbHeight = WORLD.h - sbTop;
+    chests.push({
+      x: 80 + Math.random() * (WORLD.w - 160),
+      y: sbTop + 40 + Math.random() * (sbHeight - 80),
+      bobPhase: Math.random() * Math.PI * 2,
+    });
+  }
+
+  function openChest(ch) {
+    spawnParticles(ch.x, ch.y, '#ffd700', 25);
+    playEvolve();
+    const r = Math.random();
+    if (r < 0.5) {
+      // 1/2 — Super speed for 5s
+      player.speedBoostTimer = 300;
+      showEvolveToast('SUPER SPEED!');
+    } else if (r < 0.7) {
+      // 1/5 — Fight back for 8s (predators die when they touch you)
+      player.fightBackTimer = 480;
+      showEvolveToast('FIGHT BACK!');
+    } else if (r < 0.7 + 1 / 30) {
+      // 1/30 — Kraken transform for 10s
+      player.krakenTimer = 600;
+      showEvolveToast('KRAKEN MODE!');
+    } else {
+      // Consolation — XP boost
+      const gain = 60;
+      player.xp += gain;
+      showEvolveToast(`+${gain} XP`);
+      if (player.xp >= STAGES[player.stage].xpToNext) evolve();
+    }
+  }
+
   function spawnHideSpots() {
     hideSpots = [];
     const TOTAL = 55;
@@ -610,7 +657,12 @@
   }
 
   function updatePlayer() {
-    const stage = STAGES[player.stage];
+    // Decrement bonus timers first so currentStage() reflects this frame.
+    if (player.speedBoostTimer > 0) player.speedBoostTimer--;
+    if (player.fightBackTimer > 0) player.fightBackTimer--;
+    if (player.krakenTimer > 0) player.krakenTimer--;
+    const stage = currentStage();
+    const inKraken = player.krakenTimer > 0;
     let dx = 0, dy = 0;
     if (keys['w'] || keys['arrowup']) dy -= 1;
     if (keys['s'] || keys['arrowdown']) dy += 1;
@@ -621,8 +673,17 @@
     if (len > 0) { dx /= len; dy /= len; }
 
     let speed = stage.speed;
-    // Spacebar ability differs by stage: ink for Squid, dash for Barracuda+.
-    if (stage.name === 'Squid') {
+    if (player.speedBoostTimer > 0) {
+      speed *= 2;
+      // Trailing particles for visual feedback.
+      if (player.speedBoostTimer % 3 === 0) {
+        spawnParticles(player.x, player.y, '#41c4ff', 2);
+      }
+    }
+    // Spacebar ability differs by stage. Disabled during kraken transform.
+    if (inKraken) {
+      // No abilities while transformed.
+    } else if (stage.name === 'Squid') {
       if (keys[' '] && inkCooldown === 0) {
         inkClouds.push({
           x: player.x, y: player.y,
@@ -768,7 +829,16 @@
   }
 
   function handleCollisions() {
-    const playerSize = STAGES[player.stage].size;
+    const playerSize = currentStage().size;
+    // Chest pickups.
+    for (let i = chests.length - 1; i >= 0; i--) {
+      const ch = chests[i];
+      const d = Math.hypot(ch.x - player.x, ch.y - player.y);
+      if (d < playerSize + 18) {
+        chests.splice(i, 1);
+        openChest(ch);
+      }
+    }
     for (let i = creatures.length - 1; i >= 0; i--) {
       const c = creatures[i];
       const d = Math.hypot(c.x - player.x, c.y - player.y);
@@ -783,13 +853,24 @@
           playChomp();
           if (player.xp >= STAGES[player.stage].xpToNext) evolve();
         } else if (c.species.size > playerSize * 1.05) {
-          // Got eaten.
-          playDeath();
-          gameOver(c.species.name);
-          return;
+          if (player.fightBackTimer > 0) {
+            // Fight back — eat the predator instead of dying.
+            const gained = Math.floor(c.species.size * 1.5 + 5);
+            player.xp += gained;
+            spawnParticles(c.x, c.y, '#ff5050', 18);
+            creatures.splice(i, 1);
+            playChomp();
+            if (player.xp >= STAGES[player.stage].xpToNext) evolve();
+          } else {
+            playDeath();
+            gameOver(c.species.name);
+            return;
+          }
         }
       }
     }
+    // Replenish chests if any were taken.
+    while (chests.length < CHEST_TARGET) spawnChest();
   }
 
   function updateInk() {
@@ -1181,6 +1262,45 @@
     drawEye(size * 0.55, size * 0.18, size * 0.11);
   }
 
+  function drawChest(ch) {
+    const bob = Math.sin(Date.now() * 0.003 + ch.bobPhase) * 2;
+    const x = ch.x;
+    const y = ch.y + bob;
+    // Glow halo.
+    const grad = ctx.createRadialGradient(x, y, 4, x, y, 32);
+    grad.addColorStop(0, 'rgba(255, 215, 0, 0.4)');
+    grad.addColorStop(1, 'rgba(255, 215, 0, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, 32, 0, Math.PI * 2);
+    ctx.fill();
+    // Body.
+    ctx.fillStyle = '#8b5a3c';
+    ctx.fillRect(x - 14, y - 4, 28, 14);
+    // Curved lid.
+    ctx.fillStyle = '#a0664a';
+    ctx.beginPath();
+    ctx.moveTo(x - 14, y - 4);
+    ctx.quadraticCurveTo(x, y - 17, x + 14, y - 4);
+    ctx.closePath();
+    ctx.fill();
+    // Gold trim.
+    ctx.fillStyle = '#ffd700';
+    ctx.fillRect(x - 14, y - 5, 28, 2);
+    ctx.fillRect(x - 14, y + 5, 28, 2);
+    // Lock.
+    ctx.fillStyle = '#daa520';
+    ctx.fillRect(x - 3, y - 2, 6, 8);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(x - 1, y, 2, 4);
+    // Sparkle.
+    const t = Date.now() * 0.005 + ch.bobPhase;
+    ctx.fillStyle = `rgba(255, 255, 255, ${0.6 + Math.sin(t) * 0.4})`;
+    ctx.beginPath();
+    ctx.arc(x + 8, y - 8, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   function drawSeabed() {
     const left = camera.x - 100, right = camera.x + W + 100;
     const top = camera.y - 100, bottom = camera.y + H + 100;
@@ -1326,7 +1446,7 @@
   }
 
   function checkDanger() {
-    const playerSize = STAGES[player.stage].size;
+    const playerSize = currentStage().size;
     let closest = Infinity;
     for (const c of creatures) {
       if (c.species.size > playerSize * 1.05) {
@@ -1350,7 +1470,8 @@
 
   function updateHUD() {
     const stage = STAGES[player.stage];
-    stageLabel.textContent = stage.name;
+    const isKraken = player.krakenTimer > 0;
+    stageLabel.textContent = isKraken ? 'KRAKEN' : stage.name;
     let abilityStr = '';
     if (stage.name === 'Squid') {
       abilityStr = ' · Ink: ' + (inkCooldown === 0 ? 'ready' : 'cooling');
@@ -1363,7 +1484,13 @@
     } else if (player.hideExhausted) {
       hideStr = ' · Spotted!';
     }
-    statLine.textContent = `Size ${stage.size} · Speed ${stage.speed.toFixed(1)}${abilityStr}${hideStr}`;
+    let bonusStr = '';
+    if (player.speedBoostTimer > 0) bonusStr += ` · ⚡${Math.ceil(player.speedBoostTimer / 60)}s`;
+    if (player.fightBackTimer > 0) bonusStr += ` · ⚔${Math.ceil(player.fightBackTimer / 60)}s`;
+    if (isKraken) bonusStr += ` · 🐙${Math.ceil(player.krakenTimer / 60)}s`;
+    const showSize = isKraken ? KRAKEN_OVERRIDE.size : stage.size;
+    const showSpeed = isKraken ? KRAKEN_OVERRIDE.speed : stage.speed;
+    statLine.textContent = `Size ${showSize} · Speed ${showSpeed.toFixed(1)}${abilityStr}${hideStr}${bonusStr}`;
     // Touch action button label tracks the current ability.
     let actionLabel = '';
     if (stage.name === 'Squid') actionLabel = 'INK';
@@ -1429,6 +1556,9 @@
     // Rocks (seafloor) — drawn under creatures.
     for (const h of hideSpots) if (h.kind === 'rock') drawHideSpot(h);
 
+    // Treasure chests — sit on the seabed.
+    for (const ch of chests) drawChest(ch);
+
     // Creatures.
     for (const c of creatures) {
       drawCreature(c.x, c.y, c.species.size, c.species.color, c.angle, c.species.name);
@@ -1447,7 +1577,7 @@
     }
 
     // Player — outlined so it pops. Slightly faded when hidden.
-    const stage = STAGES[player.stage];
+    const stage = currentStage();
     ctx.shadowColor = stage.color;
     ctx.shadowBlur = 12;
     if (player.hidden) ctx.globalAlpha = 0.55;
